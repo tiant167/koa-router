@@ -78,6 +78,25 @@ describe('Router', function () {
       });
   });
 
+  it('router can be accecced with ctx', function (done) {
+      var app = new Koa();
+      var router = new Router();
+      router.get('home', '/', function (ctx) {
+          ctx.body = {
+            url: ctx.router.url('home')
+          };
+      });
+      app.use(router.routes());
+      request(http.createServer(app.callback()))
+          .get('/')
+          .expect(200)
+          .end(function (err, res) {
+              if (err) return done(err);
+              expect(res.body.url).to.eql("/");
+              done();
+          });
+  });
+
   it('registers multiple middleware for one route', function(done) {
     var app = new Koa();
     var router = new Router();
@@ -523,9 +542,10 @@ describe('Router', function () {
       router.put('/users', function (ctx, next) {});
       request(http.createServer(app.callback()))
       .options('/users')
-      .expect(204)
+      .expect(200)
       .end(function (err, res) {
         if (err) return done(err);
+        res.header.should.have.property('content-length', '0');
         res.header.should.have.property('allow', 'HEAD, GET, PUT');
         done();
       });
@@ -734,6 +754,28 @@ describe('Router', function () {
         done();
       });
     });
+
+    it('sets the allowed methods to a single Allow header #273', function (done) {
+      // https://tools.ietf.org/html/rfc7231#section-7.4.1
+      var app = new Koa();
+      var router = new Router();
+      app.use(router.routes());
+      app.use(router.allowedMethods());
+
+      router.get('/', function (ctx, next) {});
+
+      request(http.createServer(app.callback()))
+        .options('/')
+        .expect(200)
+        .end(function (err, res) {
+          if (err) return done(err);
+          res.header.should.have.property('allow', 'HEAD, GET');
+          let allowHeaders = res.res.rawHeaders.filter((item) => item == 'Allow');
+          expect(allowHeaders.length).to.eql(1);
+          done();
+        });
+    });
+
   });
 
   it('supports custom routing detect path: ctx.routerPath', function (done) {
@@ -996,6 +1038,38 @@ describe('Router', function () {
           done();
         });
     });
+
+    it('does not add an erroneous (.*) to unprefiexed nested routers - gh-369 gh-410', function (done) {
+      var app = new Koa();
+      var router = new Router();
+      var nested = new Router();
+      var called = 0;
+
+      nested
+        .get('/', (ctx, next) => {
+          ctx.body = 'root';
+          called += 1;
+          return next();
+        })
+        .get('/test', (ctx, next) => {
+          ctx.body = 'test';
+          called += 1;
+          return next();
+        });
+
+      router.use(nested.routes());
+      app.use(router.routes());
+
+      request(app.callback())
+        .get('/test')
+        .expect(200)
+        .expect('test')
+        .end(function (err, res) {
+          if (err) return done(err);
+          expect(called).to.eql(1, 'too many routes matched');
+          done();
+        });
+    });
   });
 
   describe('Router#register()', function () {
@@ -1057,7 +1131,7 @@ describe('Router', function () {
   });
 
   describe('Router#url()', function () {
-    it('generates URL for given route', function (done) {
+    it('generates URL for given route name', function (done) {
       var app = new Koa();
       var router = new Router();
       app.use(router.routes());
@@ -1070,6 +1144,86 @@ describe('Router', function () {
       url.should.equal('/programming/how%20to%20node');
       done();
     });
+
+    it('generates URL for given route name within embedded routers', function (done) {
+        var app = new Koa();
+        var router = new Router({
+          prefix: "/books"
+        });
+
+        var embeddedRouter = new Router({
+          prefix: "/chapters"
+        });
+        embeddedRouter.get('chapters', '/:chapterName/:pageNumber', function (ctx) {
+          ctx.status = 204;
+        });
+        router.use(embeddedRouter.routes());
+        app.use(router.routes());
+        var url = router.url('chapters', { chapterName: 'Learning ECMA6', pageNumber: 123 });
+        url.should.equal('/books/chapters/Learning%20ECMA6/123');
+        url = router.url('chapters', 'Learning ECMA6', 123);
+        url.should.equal('/books/chapters/Learning%20ECMA6/123');
+        done();
+    });
+
+    it('generates URL for given route name within two embedded routers', function (done) {
+      var app = new Koa();
+      var router = new Router({
+        prefix: "/books"
+      });
+      var embeddedRouter = new Router({
+        prefix: "/chapters"
+      });
+      var embeddedRouter2 = new Router({
+        prefix: "/:chapterName/pages"
+      });
+      embeddedRouter2.get('chapters', '/:pageNumber', function (ctx) {
+        ctx.status = 204;
+      });
+      embeddedRouter.use(embeddedRouter2.routes());
+      router.use(embeddedRouter.routes());
+      app.use(router.routes());
+      var url = router.url('chapters', { chapterName: 'Learning ECMA6', pageNumber: 123 });
+      url.should.equal('/books/chapters/Learning%20ECMA6/pages/123');
+      done();
+    });
+
+    it('generates URL for given route name with params and query params', function(done) {
+        var app = new Koa();
+        var router = new Router();
+        router.get('books', '/books/:category/:id', function (ctx) {
+          ctx.status = 204;
+        });
+        var url = router.url('books', 'programming', 4, {
+          query: { page: 3, limit: 10 }
+        });
+        url.should.equal('/books/programming/4?page=3&limit=10');
+        var url = router.url('books',
+          { category: 'programming', id: 4 },
+          { query: { page: 3, limit: 10 }}
+        );
+        url.should.equal('/books/programming/4?page=3&limit=10');
+        var url = router.url('books',
+          { category: 'programming', id: 4 },
+          { query: 'page=3&limit=10' }
+        );
+        url.should.equal('/books/programming/4?page=3&limit=10');
+        done();
+    })
+
+
+    it('generates URL for given route name without params and query params', function(done) {
+        var app = new Koa();
+        var router = new Router();
+        router.get('category', '/category', function (ctx) {
+          ctx.status = 204;
+        });
+        var url = router.url('category', {
+          query: { page: 3, limit: 10 }
+        });
+        url.should.equal('/category?page=3&limit=10');
+        done();
+    })
   });
 
   describe('Router#param()', function () {
@@ -1379,6 +1533,42 @@ describe('Router', function () {
         done();
       });
     });
+
+    it('places a `_matchedRouteName` value on the context for a named route', function(done) {
+      var app = new Koa();
+      var router = new Router();
+
+      router.get('users#show', '/users/:id', function (ctx, next) {
+        expect(ctx._matchedRouteName).to.be('users#show')
+        ctx.status = 200
+      });
+
+      request(http.createServer(app.use(router.routes()).callback()))
+      .get('/users/1')
+      .expect(200)
+      .end(function(err, res) {
+        if (err) return done(err);
+        done();
+      });
+    });
+
+    it('does not place a `_matchedRouteName` value on the context for unnamed routes', function(done) {
+      var app = new Koa();
+      var router = new Router();
+
+      router.get('/users/:id', function (ctx, next) {
+        expect(ctx._matchedRouteName).to.be(undefined)
+        ctx.status = 200
+      });
+
+      request(http.createServer(app.use(router.routes()).callback()))
+      .get('/users/1')
+      .expect(200)
+      .end(function(err, res) {
+        if (err) return done(err);
+        done();
+      });
+    });
   });
 
   describe('If no HEAD method, default to GET', function () {
@@ -1559,6 +1749,32 @@ describe('Router', function () {
     it('escapes using encodeURIComponent()', function () {
       var url = Router.url('/:category/:title', { category: 'programming', title: 'how to node' });
       url.should.equal('/programming/how%20to%20node');
+    });
+
+    it('generates route URL with params and query params', function(done) {
+        var url = Router.url('/books/:category/:id', 'programming', 4, {
+          query: { page: 3, limit: 10 }
+        });
+        url.should.equal('/books/programming/4?page=3&limit=10');
+        var url = Router.url('/books/:category/:id',
+          { category: 'programming', id: 4 },
+          { query: { page: 3, limit: 10 }}
+        );
+        url.should.equal('/books/programming/4?page=3&limit=10');
+        var url = Router.url('/books/:category/:id',
+          { category: 'programming', id: 4 },
+          { query: 'page=3&limit=10' }
+        );
+        url.should.equal('/books/programming/4?page=3&limit=10');
+        done();
+    });
+
+    it('generates router URL without params and with with query params', function(done) {
+        var url = Router.url('/category', {
+          query: { page: 3, limit: 10 }
+        });
+        url.should.equal('/category?page=3&limit=10');
+        done();
     });
   });
 });
